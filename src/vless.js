@@ -106,35 +106,115 @@ function findFirstValueByKeys(obj, keys) {
   return walk(obj);
 }
 
-function realityKeysFromInbound(inboundTemplate) {
-  // We try a couple of common 3x-ui/xray shapes for reality settings.
-  const reality =
+function tryJsonParse(maybeJson) {
+  if (maybeJson == null) return null;
+  if (typeof maybeJson === 'object') return maybeJson;
+  if (typeof maybeJson !== 'string') return null;
+  const trimmed = maybeJson.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function firstNonEmpty(values) {
+  for (const v of values) {
+    if (Array.isArray(v)) {
+      const nested = firstNonEmpty(v);
+      if (nested != null) return nested;
+      continue;
+    }
+    if (isNonEmptyString(v)) return String(v).trim();
+  }
+  return null;
+}
+
+function pickRealityObject(inboundTemplate) {
+  const streamSettings =
+    tryJsonParse(inboundTemplate?.streamSettings) ??
+    tryJsonParse(inboundTemplate?.settings?.streamSettings) ??
+    inboundTemplate?.streamSettings ??
+    inboundTemplate?.settings?.streamSettings ??
+    null;
+
+  const settingsObj = tryJsonParse(inboundTemplate?.settings) ?? inboundTemplate?.settings;
+
+  return (
     inboundTemplate?.realitySettings ||
-    inboundTemplate?.streamSettings?.realitySettings ||
-    inboundTemplate?.settings?.streamSettings?.realitySettings ||
-    inboundTemplate?.settings?.realitySettings ||
-    findFirstDeep(inboundTemplate, (n) => typeof n === 'object' && (n.fingerprint || n.publicKey || n.shortId || n.spiderX || n.serverName));
+    streamSettings?.realitySettings ||
+    settingsObj?.streamSettings?.realitySettings ||
+    settingsObj?.realitySettings ||
+    findFirstDeep(
+      inboundTemplate,
+      (n) =>
+        typeof n === 'object' &&
+        !Array.isArray(n) &&
+        (n.fingerprint ||
+          n.publicKey ||
+          n.shortId ||
+          n.shortIds ||
+          n.spiderX ||
+          n.serverName ||
+          n.serverNames)
+    )
+  );
+}
 
-  const fp = reality?.fingerprint ?? reality?.fp ?? findFirstValueByKeys(reality, ['fingerprint', 'fp']);
-  const pbk = reality?.publicKey ?? reality?.pbk ?? findFirstValueByKeys(reality, ['publicKey', 'pbk']);
-  const sid = reality?.shortId ?? reality?.sid ?? findFirstValueByKeys(reality, ['shortId', 'sid']);
-  const sni = reality?.serverName ?? reality?.sni ?? findFirstValueByKeys(reality, ['serverName', 'sni', 'serverNames']);
-  const spx = reality?.spiderX ?? reality?.spx ?? reality?.path ?? findFirstValueByKeys(reality, ['spiderX', 'spx', 'path']);
-  const flow = reality?.flow ?? findFirstValueByKeys(inboundTemplate, ['flow', 'xtlsFlow', 'xtlsSettings']);
+function realityKeysFromInbound(inboundTemplate) {
+  // 3x-ui usually stores Reality under streamSettings (JSON string) as:
+  // realitySettings: { shortIds: ["", "abcd"], serverNames: [...], settings: { publicKey, fingerprint, spiderX } }
+  const reality = pickRealityObject(inboundTemplate);
+  const nested = reality?.settings && typeof reality.settings === 'object' ? reality.settings : null;
 
-  const sniValue = Array.isArray(sni) ? sni[0] : sni;
-  const sidValue = Array.isArray(sid) ? sid[0] : sid;
-  const spxValue = Array.isArray(spx) ? spx[0] : spx;
+  const fp = firstNonEmpty([
+    reality?.fingerprint,
+    reality?.fp,
+    nested?.fingerprint,
+    nested?.fp,
+    findFirstValueByKeys(reality, ['fingerprint', 'fp']),
+  ]);
+  const pbk = firstNonEmpty([
+    reality?.publicKey,
+    reality?.pbk,
+    nested?.publicKey,
+    nested?.pbk,
+    findFirstValueByKeys(reality, ['publicKey', 'pbk']),
+  ]);
+  const sid = firstNonEmpty([
+    reality?.shortId,
+    reality?.sid,
+    reality?.shortIds,
+    nested?.shortId,
+    nested?.sid,
+    nested?.shortIds,
+    findFirstValueByKeys(reality, ['shortId', 'sid', 'shortIds']),
+  ]);
+  const sni = firstNonEmpty([
+    reality?.serverName,
+    reality?.sni,
+    reality?.serverNames,
+    nested?.serverName,
+    nested?.sni,
+    findFirstValueByKeys(reality, ['serverName', 'sni', 'serverNames']),
+  ]);
+  const spx = firstNonEmpty([
+    reality?.spiderX,
+    reality?.spx,
+    reality?.path,
+    nested?.spiderX,
+    nested?.spx,
+    nested?.path,
+    findFirstValueByKeys(reality, ['spiderX', 'spx']),
+  ]);
+  const flow = firstNonEmpty([
+    reality?.flow,
+    nested?.flow,
+    findFirstValueByKeys(inboundTemplate, ['flow']),
+  ]);
 
-  return {
-    fp: fp ?? null,
-    pbk: pbk ?? null,
-    sid: sidValue ?? null,
-    sni: sniValue ?? null,
-    spx: spxValue ?? null,
-    flow: flow ?? null,
-    reality,
-  };
+  return { fp, pbk, sid, sni, spx, flow, reality };
 }
 
 function buildVlessLinkFromRealityInbound({ uuid, email, inboundTemplate, publicHost }) {
