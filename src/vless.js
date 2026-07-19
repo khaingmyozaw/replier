@@ -29,7 +29,34 @@ function tryParseVlessLink(input) {
   if (hashIdx >= 0) tag = decodeURIComponent(s.slice(hashIdx + 1)).trim() || null;
 
   // Keep the raw query string (without leading "?") to preserve parameters.
-  return { uuid, host, port, params, tag, original: s };
+  return { uuid, host, port, params, tag, original: s, reality: parseVlessRealityParams(params) };
+}
+
+function parseVlessRealityParams(params) {
+  if (!isNonEmptyString(params)) return {};
+  let search;
+  try {
+    search = new URLSearchParams(params);
+  } catch {
+    return {};
+  }
+
+  const get = (key) => {
+    const v = search.get(key);
+    return isNonEmptyString(v) ? v.trim() : null;
+  };
+
+  return {
+    fp: get('fp'),
+    pbk: get('pbk'),
+    sid: get('sid'),
+    sni: get('sni'),
+    spx: get('spx'),
+    flow: get('flow'),
+    type: get('type'),
+    security: get('security'),
+    encryption: get('encryption'),
+  };
 }
 
 function updateVlessHostPort(vlessLink, { publicHost, publicPort }) {
@@ -217,12 +244,50 @@ function realityKeysFromInbound(inboundTemplate) {
   return { fp, pbk, sid, sni, spx, flow, reality };
 }
 
-function buildVlessLinkFromRealityInbound({ uuid, email, inboundTemplate, publicHost }) {
+function pickParam(primary, fallback) {
+  return isNonEmptyString(primary) ? String(primary).trim() : isNonEmptyString(fallback) ? String(fallback).trim() : null;
+}
+
+function buildVlessFragmentTag({ email, inboundTemplate, fallbackTag, uuid }) {
+  const remark = firstNonEmpty([inboundTemplate?.remark, inboundTemplate?.tag]);
+  const name = isNonEmptyString(email) ? String(email).trim() : null;
+  if (remark && name) return `${remark}-${name}`;
+  if (name) return name;
+  if (isNonEmptyString(fallbackTag)) return String(fallbackTag).trim();
+  return uuid;
+}
+
+function buildVlessLinkFromRealityInbound({
+  uuid,
+  email,
+  inboundTemplate,
+  publicHost,
+  fallbackParams,
+  fallbackTag,
+}) {
   const host = isNonEmptyString(publicHost) ? publicHost : inboundTemplate?.host;
   const port = inboundTemplate?.port ?? inboundTemplate?.listen ?? inboundTemplate?.streamSettings?.port;
 
-  const { fp, pbk, sid, sni, spx, flow } = realityKeysFromInbound(inboundTemplate);
+  const fromPanel = realityKeysFromInbound(inboundTemplate);
+  const fromLink = fallbackParams && typeof fallbackParams === 'object' ? fallbackParams : {};
 
+  const fp = pickParam(fromPanel.fp, fromLink.fp);
+  const pbk = pickParam(fromPanel.pbk, fromLink.pbk);
+  const sid = pickParam(fromPanel.sid, fromLink.sid);
+  const sni = pickParam(fromPanel.sni, fromLink.sni);
+  // Prefer pasted spx (3x-ui share links often use a client-specific path).
+  const spx = pickParam(fromLink.spx, fromPanel.spx) || '/';
+  const flow = pickParam(fromPanel.flow, fromLink.flow);
+
+  assertVlessBuildInputs({ uuid, host, port, fp, pbk, sni, sid });
+
+  const params = buildRealityQueryParams({ fp, pbk, sid, sni, spx, flow });
+  const tag = buildVlessFragmentTag({ email, inboundTemplate, fallbackTag, uuid });
+
+  return `vless://${uuid}@${host}:${port}?${params}#${encodeURIComponent(tag)}`;
+}
+
+function assertVlessBuildInputs({ uuid, host, port, fp, pbk, sni, sid }) {
   const missing = [];
   if (!isNonEmptyString(uuid)) missing.push('uuid');
   if (!host) missing.push('host');
@@ -231,40 +296,29 @@ function buildVlessLinkFromRealityInbound({ uuid, email, inboundTemplate, public
   if (!pbk) missing.push('publicKey (pbk)');
   if (!sni) missing.push('serverName (sni)');
   if (!sid) missing.push('shortId (sid)');
-
   if (missing.length) {
     throw new Error(`Could not build VLESS link. Missing: ${missing.join(', ')}.`);
   }
+}
 
-  // This builds a standard VLESS Reality link. If your inbound uses different parameters,
-  // you can always send the current `vless://...` link and we will only update host/port.
+function buildRealityQueryParams({ fp, pbk, sid, sni, spx, flow }) {
+  // Match common VLESS Reality share-link order used by 3x-ui / clients.
   const params = new URLSearchParams();
-  params.set('type', 'tcp');
-  params.set('security', 'reality');
   params.set('encryption', 'none');
-
+  params.set('fp', String(fp));
+  params.set('pbk', String(pbk));
+  params.set('security', 'reality');
+  params.set('sid', String(sid));
+  params.set('sni', String(sni));
+  params.set('spx', String(spx));
+  params.set('type', 'tcp');
   if (flow) params.set('flow', String(flow));
-  if (fp) params.set('fp', String(fp));
-  if (pbk) params.set('pbk', String(pbk));
-  if (sni) params.set('sni', String(sni));
-  if (sid) params.set('sid', String(sid));
-
-  if (spx) {
-    // Most UIs use `/` but whatever is configured should work.
-    params.set('spx', String(spx));
-  } else {
-    // Reality usually requires spx/spiderX; keep the default `/` if missing.
-    params.set('spx', '/');
-  }
-
-  // Telegram tag (fragment).
-  const tag = isNonEmptyString(email) ? String(email) : uuid;
-
-  return `vless://${uuid}@${host}:${port}?${params.toString()}#${tag}`;
+  return params.toString();
 }
 
 module.exports = {
   tryParseVlessLink,
+  parseVlessRealityParams,
   updateVlessHostPort,
   buildVlessLinkFromRealityInbound,
 };

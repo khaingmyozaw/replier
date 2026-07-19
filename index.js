@@ -94,11 +94,19 @@ function extractQueryFromText(ctx) {
 }
 
 function friendlyInput(input) {
-  return String(input).replaceAll('_', '\\_');
+  return escapeHtml(String(input));
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }
 
 function formatEndpointLink(name, link) {
-  return `<b>${name}</b>\n<pre>${link}</pre>`;
+  // Telegram HTML mode mangles raw "&" in query strings — escape the link.
+  return `<b>${escapeHtml(name)}</b>\n<pre>${escapeHtml(link)}</pre>`;
 }
 
 function rewriteVlessForEndpoints(query) {
@@ -114,7 +122,7 @@ function rewriteVlessForEndpoints(query) {
   return parts;
 }
 
-async function lookupOnEndpoint(ep, { query, uuidMaybe, emailMaybe }) {
+async function lookupOnEndpoint(ep, { query, uuidMaybe, emailMaybe, vless }) {
   if (!ep.xui) return null;
   await ensureXuiFresh(ep);
 
@@ -124,22 +132,36 @@ async function lookupOnEndpoint(ep, { query, uuidMaybe, emailMaybe }) {
   });
   if (!inboundTemplate || !uuid) return null;
 
-  const vlessLink = buildVlessLinkFromRealityInbound({
-    uuid,
-    email,
-    inboundTemplate,
-    publicHost: ep.publicHost,
-  });
-  return formatEndpointLink(ep.name, vlessLink);
+  try {
+    const vlessLink = buildVlessLinkFromRealityInbound({
+      uuid,
+      email,
+      inboundTemplate,
+      publicHost: ep.publicHost,
+      fallbackParams: vless?.reality,
+      fallbackTag: vless?.tag,
+    });
+    return formatEndpointLink(ep.name, vlessLink);
+  } catch (err) {
+    // Panel Reality incomplete — still rewrite host/port from the pasted share link.
+    if (vless?.original && ep.publicHost) {
+      const rewritten = updateVlessHostPort(vless.original, {
+        publicHost: ep.publicHost,
+        publicPort: ep.publicPort,
+      });
+      if (rewritten) return formatEndpointLink(ep.name, rewritten);
+    }
+    throw err;
+  }
 }
 
-async function lookupAcrossEndpoints({ query, uuidMaybe, emailMaybe }) {
+async function lookupAcrossEndpoints({ query, uuidMaybe, emailMaybe, vless }) {
   const parts = [];
   const errors = [];
 
   for (const ep of endpoints) {
     try {
-      const block = await lookupOnEndpoint(ep, { query, uuidMaybe, emailMaybe });
+      const block = await lookupOnEndpoint(ep, { query, uuidMaybe, emailMaybe, vless });
       if (block) parts.push(block);
     } catch (err) {
       console.error(`[${ep.name}] lookup failed:`, err);
@@ -269,6 +291,7 @@ async function handleQuery(query) {
     query,
     uuidMaybe,
     emailMaybe,
+    vless,
   });
 
   if (parts.length > 0) {
